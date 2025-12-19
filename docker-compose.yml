@@ -1,0 +1,175 @@
+version: '3.8'
+
+networks:
+  streamloom:
+    driver: bridge
+
+volumes:
+  kafka_data: {}
+  clickhouse_data: {}
+  grafana_data: {}
+
+services:
+  kafka:
+    image: bitnami/kafka:3.6
+    container_name: kafka
+    restart: unless-stopped
+    networks:
+      - streamloom
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      - KAFKA_ENABLE_KRAFT=yes
+      - KAFKA_CFG_NODE_ID=1
+      - KAFKA_CFG_PROCESS_ROLES=broker,controller
+      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:29092
+      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=1@kafka:9093
+      - KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE=false
+      - KAFKA_CFG_MESSAGE_MAX_BYTES=20000000
+      - KAFKA_CFG_NUM_PARTITIONS=3
+      - KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+      - ALLOW_PLAINTEXT_LISTENER=yes
+    volumes:
+      - kafka_data:/bitnami/kafka
+    healthcheck:
+      test: ["CMD", "kafka-topics.sh", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    restart: unless-stopped
+    networks:
+      - streamloom
+    ports:
+      - "8080:8080"
+    environment:
+      - KAFKA_CLUSTERS_0_NAME=local
+      - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=kafka:9092
+      - KAFKA_CLUSTERS_0_ZOOKEEPER=disabled
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:23.10
+    container_name: clickhouse
+    restart: unless-stopped
+    networks:
+      - streamloom
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./clickhouse/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--host", "localhost", "--query", "SELECT 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    container_name: prometheus
+    restart: unless-stopped
+    networks:
+      - streamloom
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+
+  grafana:
+    image: grafana/grafana:10.2.3
+    container_name: grafana
+    restart: unless-stopped
+    networks:
+      - streamloom
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./deploy/grafana/datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro
+      - ./deploy/grafana/dashboard.json:/etc/grafana/provisioning/dashboards/dashboard.json:ro
+      - ./deploy/grafana/dashboard-provisioning.yaml:/etc/grafana/provisioning/dashboards/dashboard-provisioning.yaml:ro
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    depends_on:
+      - prometheus
+
+  binance-ingestor:
+    build: ./services/binance-ingestor
+    image: streamloom/binance-ingestor:local
+    container_name: binance-ingestor
+    restart: unless-stopped
+    networks:
+      - streamloom
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - BINANCE_STREAMS=btcusdt@aggTrade/ethusdt@aggTrade/solusdt@aggTrade
+      - RAW_TOPIC=raw_trades
+      - LOG_LEVEL=info
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  trade-streams:
+    build: ./services/trade-streams
+    image: streamloom/trade-streams:local
+    container_name: trade-streams
+    restart: unless-stopped
+    networks:
+      - streamloom
+    environment:
+      - BOOTSTRAP_SERVERS=kafka:9092
+      - RAW_TOPIC=raw_trades
+      - ENRICHED_TOPIC=enriched_trades
+      - CANDLE_TOPIC=candles_1m
+      - APPLICATION_ID=trade-streams
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  clickhouse-sink:
+    build: ./services/clickhouse-sink
+    image: streamloom/clickhouse-sink:local
+    container_name: clickhouse-sink
+    restart: unless-stopped
+    networks:
+      - streamloom
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - CLICKHOUSE_DSN=clickhouse://default:@clickhouse:9000/default
+      - ENRICHED_TOPIC=enriched_trades
+      - CANDLE_TOPIC=candles_1m
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      trade-streams:
+        condition: service_started
+
+  api:
+    build: ./services/api
+    image: streamloom/api:local
+    container_name: streamloom-api
+    restart: unless-stopped
+    networks:
+      - streamloom
+    ports:
+      - "8088:8088"
+    environment:
+      - CLICKHOUSE_DSN=clickhouse://default:@clickhouse:9000/default
+      - API_PORT=8088
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+

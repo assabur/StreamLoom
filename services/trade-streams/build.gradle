@@ -1,0 +1,31 @@
+plugins {
+    id 'java'
+    id 'application'
+}
+
+group = 'com.streamloom.markets'
+version = '0.1.0'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'org.apache.kafka:kafka-streams:3.6.0'
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.15.3'
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.0'
+    testImplementation 'org.apache.kafka:kafka-streams-test-utils:3.6.0'
+}
+
+application {
+    mainClass = 'com.streamloom.markets.TradeStreamsApp'
+}
+
+test {
+    useJUnitPlatform()
+}

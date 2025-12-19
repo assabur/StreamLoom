@@ -1,0 +1,19 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: 'binance-ingestor'
+    static_configs:
+      - targets: ['binance-ingestor:2112']
+  - job_name: 'clickhouse-sink'
+    static_configs:
+      - targets: ['clickhouse-sink:2112']
+  - job_name: 'api'
+    static_configs:
+      - targets: ['streamloom-api:2112']
+  - job_name: 'kafka'
+    static_configs:
+      - targets: ['kafka:7071']
+  - job_name: 'clickhouse'
+    static_configs:
+      - targets: ['clickhouse:9363']
