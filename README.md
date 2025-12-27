@@ -1,6 +1,19 @@
-# Streamloom - EOD Producer
 
-Ce README explique comment lancer le producer Go qui publie des messages EOD sur Kafka.
+# Streamloon a pour but de recuperer en temps réels les actifs sur le marché notament sur stook les agreger et ensuite les stocker sur Clikhousse
+
+
+
+Ce README explique comment lancer le producer Go qui publie des messages EOD (end of day) sur Kafka.
+
+## Lire ce README
+
+Depuis la racine du projet :
+
+```bash
+cat README.md
+```
+
+Ou ouvre le fichier dans ton editeur.
 
 ## Prerequis
 
