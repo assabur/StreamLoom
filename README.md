@@ -1,9 +1,38 @@
 
-# Streamloon a pour but de recuperer en temps réels les actifs sur le marché notament sur stook les agreger et ensuite les stocker sur Clikhousse
+# StreamLoom
 
+StreamLoom recupere en temps reel des actifs de marche (Stooq), les agrege via Kafka Streams,
+puis stocke les resultats dans ClickHouse Cloud.
 
+Ce README explique comment lancer le producer Go et l'architecture de bout en bout.
 
-Ce README explique comment lancer le producer Go qui publie des messages EOD (end of day) sur Kafka.
+## Architecture (bout en bout)
+
+```text
+Go producer (Stooq / stdin)
+            |
+            v
+Kafka topic: eod
+            |
+            v
+Kafka Streams (parse + validation)
+            |                         \
+            | valides                  \ invalides
+            v                          v
+normalisation                     DLT topic: eod-dlt
+            |
+            v
+aggregations (fenetres 1m, 1d)
+            |                 \
+            v                  v
+eod-agg-1m                  eod-agg-daily
+            \                 /
+             v               v
+        Kafka Connect (sink)
+                  |
+                  v
+ClickHouse Cloud: eod_agg_1m, eod_agg_daily, eod_dlt
+```
 
 ## Lire ce README
 
@@ -90,6 +119,62 @@ go run . -stooq -symbols "AAPL.US,MSFT.US" -poll-interval 5s
 - `-poll-interval` : frequence de polling Stooq
 - `-stooq-url` : template URL Stooq avec `%s`
 
-## Notes
+## Kafka Streams
 
-- Le topic `eod` doit exister sur Kafka (l'auto-creation est generalement active en local).
+Le module Kafka Streams lit `eod` et ecrit `eod-agg-1m`, `eod-agg-daily` et `eod-dlt`.
+
+```bash
+cd src/java/eod-aggregator-streams
+./gradlew run
+```
+
+## Kafka Connect -> ClickHouse Cloud
+
+Kafka Connect consomme `eod-agg-1m`, `eod-agg-daily`, `eod-dlt` et ecrit dans ClickHouse.
+Les tables cibles sont mappees vers :
+
+- `eod-agg-1m` -> `eod_agg_1m`
+- `eod-agg-daily` -> `eod_agg_daily`
+- `eod-dlt` -> `eod_dlt`
+
+### Configuration
+
+1) Cree un fichier `.env` a partir de `.env.example`.
+2) Renseigne :
+
+- `CLICKHOUSE_HOST`
+- `CLICKHOUSE_PORT`
+- `CLICKHOUSE_DATABASE`
+- `CLICKHOUSE_USER`
+- `CLICKHOUSE_PASSWORD`
+
+### Demarrer Kafka Connect
+
+```bash
+docker compose up -d kafka-connect
+```
+
+### Creer le connector
+
+```bash
+curl -s -X POST http://localhost:8083/connectors \
+  -H "Content-Type: application/json" \
+  --data @connectors/clickhouse-sink.json
+```
+
+## Grafana (dashboard demo)
+
+Un dashboard Grafana est disponible dans `dashboards/grafana-eod-agg-1m.json`.
+
+### Demarrer Grafana
+
+```bash
+docker compose up -d grafana
+```
+
+### Importer le dashboard
+
+1) Ouvre `http://localhost:3000` (login: `admin` / `admin`).
+2) Va sur **+ -> Import**.
+3) Charge `dashboards/grafana-eod-agg-1m.json`.
+4) Selectionne la datasource ClickHouse.

@@ -2,10 +2,12 @@
 out/
 !**/src/main/**/out/
 !**/src/test/**/out/
+.idea/
 
 ### Build outputs ###
 build/
 src/java/eod-aggregator-streams/build/
+.gradle/
 
 ### Eclipse ###
 .apt_generated

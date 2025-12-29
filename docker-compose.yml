@@ -44,6 +44,48 @@ services:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
 
+  kafka-connect:
+    build:
+      context: .
+      dockerfile: docker/kafka-connect/Dockerfile
+    image: streamloom-kafka-connect:latest
+    container_name: streamloom-kafka-connect
+    depends_on:
+      - kafka
+    ports:
+      - "8083:8083"
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: kafka:29092
+      CONNECT_REST_PORT: 8083
+      CONNECT_REST_ADVERTISED_HOST_NAME: kafka-connect
+      CONNECT_GROUP_ID: streamloom-connect
+      CONNECT_CONFIG_STORAGE_TOPIC: streamloom-connect-configs
+      CONNECT_OFFSET_STORAGE_TOPIC: streamloom-connect-offsets
+      CONNECT_STATUS_STORAGE_TOPIC: streamloom-connect-status
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.storage.StringConverter
+      CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_CONFIG_PROVIDERS: env
+      CONNECT_CONFIG_PROVIDERS_ENV_CLASS: org.apache.kafka.common.config.provider.EnvVarConfigProvider
+      CLICKHOUSE_HOST: ${CLICKHOUSE_HOST}
+      CLICKHOUSE_PORT: ${CLICKHOUSE_PORT}
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: streamloom-grafana
+    depends_on:
+      - kafka-connect
+    environment:
+      GF_INSTALL_PLUGINS: grafana-clickhouse-datasource
+    ports:
+      - "3000:3000"
+
 volumes:
   zookeeper-data:
   zookeeper-log:
