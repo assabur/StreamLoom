@@ -2,12 +2,15 @@
 out/
 !**/src/main/**/out/
 !**/src/test/**/out/
-.idea/
+**/.idea/
+*.iml
 
 ### Build outputs ###
 build/
-src/java/eod-aggregator-streams/build/
-.gradle/
+target/
+/apps/processor/project/target/
+.bsp/
+.metals/
 
 ### Eclipse ###
 .apt_generated
@@ -26,10 +29,14 @@ bin/
 /nbbuild/
 /dist/
 /nbdist/
-/.nb-gradle/
 
 ### VS Code ###
 .vscode/
 
 ### Mac OS ###
 .DS_Store
+
+### Local configuration ###
+.env
+.env.*
+!.env.example
