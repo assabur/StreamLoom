@@ -1,6 +1,6 @@
 # StreamLoom
 
-StreamLoom collecte des cotations boursières, les transforme en résumés par minute, par heure et par jour, puis permet de les consulter dans Apache Superset.
+StreamLoom génère des cotations boursières simulées, les transforme en résumés par minute, par heure et par jour, puis permet de les consulter dans Apache Superset.
 
 Une **bougie OHLCV** contient le prix d’ouverture, le plus haut, le plus bas, le prix de clôture et le volume d’une période.
 
@@ -8,30 +8,31 @@ Une **bougie OHLCV** contient le prix d’ouverture, le plus haut, le plus bas, 
 
 ```mermaid
 flowchart LR
-    source["Stooq : cotations"] --> producer["Go : collecter"]
+    source["Cotations fictives"] --> producer["Go : simuler et publier"]
     producer --> kafka["Kafka : transporter"]
     kafka --> aggregator["Scala : calculer"]
     aggregator -->|"via Kafka Connect"| database[("ClickHouse : stocker")]
     database --> superset["Apache Superset : visualiser"]
 ```
 
-Go et Scala tournent dans deux terminaux. Docker lance les services locaux. ClickHouse Cloud est une instance externe à configurer pour le stockage et les graphiques.
+Go et Scala tournent dans deux terminaux. Docker lance Kafka, ClickHouse, Kafka Connect et Superset. Les cotations sont stockées localement dans un volume ClickHouse persistant ; les tables sont créées automatiquement.
 
 ## Se repérer dans les dossiers
 
 ```text
 StreamLoom/
 ├── apps/                       # Les deux applications
-│   ├── producer/               # Go : collecte Stooq et envoi vers Kafka
+│   ├── producer/               # Go : simulation et envoi vers Kafka
 │   │   ├── main.go
 │   │   └── go.mod
-│   └── processor/             # Scala : validation et calcul des bougies
+│   └── processor/              # Scala : validation et calcul des bougies
 │       ├── build.sbt
 │       ├── project/            # Version de sbt et plugins
 │       └── src/
 │           ├── main/scala/      # Code de l’application
 │           └── test/           # Tests unitaires et scénarios BDD
 ├── infra/                      # Configuration des services
+│   ├── clickhouse/             # Schéma des tables et initialisation
 │   ├── kafka-connect/          # Dockerfile et connecteur ClickHouse
 │   └── superset/               # Image, configuration et dashboard
 ├── docs/                       # Configuration et explications du code
@@ -54,14 +55,16 @@ Prérequis : **Docker Compose**, **Go 1.21+**, **JDK 17**, **sbt**, **Python 3**
 
 Toutes les commandes `make` se lancent depuis la racine du projet. `make help` affiche les commandes disponibles.
 
-### 1. Lancer Kafka et Superset
+### 1. Lancer Kafka, ClickHouse et Superset
 
 ```bash
 make up
 make topics
 ```
 
-`make up` génère les secrets Superset manquants dans `.env`, puis démarre ZooKeeper, Kafka, Kafka UI et Superset avec sa base PostgreSQL. La commande attend aussi que Superset soit prêt. Attendre que Kafka soit prêt avant `make topics` ; si la commande échoue pendant le démarrage du broker, la relancer. La création des cinq topics peut être répétée sans les recréer.
+`make up` génère les secrets locaux manquants dans `.env`, puis démarre ZooKeeper, Kafka, Kafka UI, ClickHouse et Superset avec sa base PostgreSQL. La commande attend que ClickHouse et Superset soient prêts. Attendre que Kafka soit prêt avant `make topics` ; si la commande échoue pendant le démarrage du broker, la relancer. La création des cinq topics peut être répétée sans les recréer.
+
+`make up producer` et `make producer up` préparent tous deux les services avant de lancer le producteur. Pour garder le processor et le producteur actifs ensemble, utiliser deux terminaux comme ci-dessous.
 
 ### 2. Lancer l’agrégateur Scala
 
@@ -79,11 +82,19 @@ Dans un deuxième terminal :
 make producer
 ```
 
-Par défaut, il collecte `AAPL.US` et `MSFT.US` toutes les 5 secondes. Pour choisir les symboles et l’intervalle :
+Par défaut, il génère des cotations fictives pour `AAPL.US` et `MSFT.US` toutes les 5 secondes, sans CSV ni API. Les prix évoluent par symbole et les volumes sont générés par intervalle. Tous les messages portent `source=simulation`. Pour choisir les symboles et l’intervalle :
 
 ```bash
 make producer SYMBOLS=AAPL.US POLL_INTERVAL=10s
 ```
+
+Pour une simulation courte de dix tours :
+
+```bash
+make producer SIMULATION_ROUNDS=10 POLL_INTERVAL=1s
+```
+
+`Ctrl+C` arrête la simulation continue. Le mode Stooq reste accessible explicitement avec `make producer-stooq` si le service redevient disponible. Le [guide de configuration](docs/configuration.md#simulation-locale) détaille aussi l’accélération du temps simulé.
 
 ### 4. Observer les résultats
 
@@ -120,7 +131,7 @@ make test-unit   # Tests unitaires et de topologie et vérification Go
 make test-bdd    # Scénarios Cucumber en français uniquement
 ```
 
-Les tests fonctionnent sans Docker, Stooq ou ClickHouse. Le flux Kafka est simulé en mémoire. Le module Scala comprend **36 tests unitaires et de topologie** et **6 scénarios BDD** ; le producteur Go ne contient pas encore de tests dédiés.
+Les tests fonctionnent sans Docker, Stooq ou ClickHouse. Le flux Kafka est simulé en mémoire. Le module Scala comprend **36 tests unitaires et de topologie** et **6 scénarios BDD** ; le producteur Go comprend **12 tests** de collecte HTTP, de génération de cotations et de publication simulée.
 
 Pour exécuter les tests Scala, générer le JAR dans `apps/processor/target/scala-2.13/` et compiler le binaire Go dans `build/producer` :
 
@@ -130,16 +141,16 @@ make build
 
 ## Ajouter le stockage et les graphiques
 
-1. Copier `.env.example` vers `.env` si ce fichier n’existe pas, puis renseigner les identifiants ClickHouse Cloud.
-2. Créer les tables ClickHouse décrites dans le [guide de configuration](docs/configuration.md#stockage-dans-clickhouse-cloud).
-3. Lancer `make connect`, puis `make connector` quand l’API Kafka Connect est disponible. L’enregistrement du connecteur est à effectuer une seule fois.
-4. Lancer `make superset`, puis `make superset-setup` pour créer la connexion ClickHouse, les datasets et le dashboard. Les secrets locaux sont générés dans `.env` sans écraser les valeurs existantes.
+1. Lancer `make up` : les identifiants locaux manquants et les tables ClickHouse sont préparés automatiquement. `.env.example` permet de personnaliser le nom de la base et de l’utilisateur avant le premier démarrage.
+2. Lancer `make connect`, puis `make connector` quand l’API Kafka Connect est disponible. Si le connecteur existe déjà, utiliser `make connector-update` pour appliquer la connexion locale.
+3. Lancer `make superset-setup` pour créer les datasets et les graphiques, ou reconnecter le dashboard existant au ClickHouse local.
 
 | Service | Adresse locale |
 | --- | --- |
 | Kafka | `localhost:9092` |
 | Kafka UI | <http://localhost:8080> |
 | Kafka Connect | <http://localhost:8083> |
+| ClickHouse HTTP | <http://localhost:8123> |
 | Apache Superset | <http://localhost:8088> |
 
 Se connecter avec `admin` et la valeur `SUPERSET_ADMIN_PASSWORD` du fichier `.env`. Le [guide de configuration](docs/configuration.md#tableaux-de-bord-apache-superset) détaille les datasets et les graphiques.
@@ -153,4 +164,4 @@ make down       # Arrêter les services Docker en conservant les volumes Kafka
 make logs       # Suivre les logs des services Docker
 ```
 
-Les dashboards et les connexions Superset sont conservés dans un volume PostgreSQL. Garder aussi les secrets du fichier `.env`. Les commandes détaillées et les pistes de diagnostic sont dans [docs/configuration.md](docs/configuration.md#arrêt-et-diagnostic).
+Les cotations ClickHouse et les métadonnées Superset sont conservées dans leurs volumes Docker. Garder aussi les secrets du fichier `.env`. Les commandes détaillées et les pistes de diagnostic sont dans [docs/configuration.md](docs/configuration.md#arrêt-et-diagnostic).

@@ -42,6 +42,29 @@ services:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
 
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.8
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE:-streamloom}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-streamloom}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+    ports:
+      - "127.0.0.1:8123:8123"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./infra/clickhouse/init.sh:/docker-entrypoint-initdb.d/01-streamloom.sh:ro
+      - ./infra/clickhouse/schema.sql:/opt/streamloom/schema.sql:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user \"$$CLICKHOUSE_USER\" --password \"$$CLICKHOUSE_PASSWORD\" --database \"$$CLICKHOUSE_DB\" --query 'EXISTS TABLE eod_dlt' | grep -qx 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
   kafka-connect:
     build:
       context: ./infra/kafka-connect
@@ -49,7 +72,10 @@ services:
     image: streamloom-kafka-connect:latest
     container_name: streamloom-kafka-connect
     depends_on:
-      - kafka
+      kafka:
+        condition: service_started
+      clickhouse:
+        condition: service_healthy
     ports:
       - "8083:8083"
     environment:
@@ -68,11 +94,11 @@ services:
       CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
       CONNECT_CONFIG_PROVIDERS: env
       CONNECT_CONFIG_PROVIDERS_ENV_CLASS: org.apache.kafka.common.config.provider.EnvVarConfigProvider
-      CLICKHOUSE_HOST: ${CLICKHOUSE_HOST}
-      CLICKHOUSE_PORT: ${CLICKHOUSE_PORT}
-      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE}
-      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-streamloom}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-streamloom}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
 
   superset-db:
     image: postgres:16.6-alpine
@@ -95,10 +121,10 @@ services:
       SUPERSET_DB_PASSWORD: ${SUPERSET_DB_PASSWORD:-}
       SUPERSET_ADMIN_USERNAME: ${SUPERSET_ADMIN_USERNAME:-admin}
       SUPERSET_ADMIN_PASSWORD: ${SUPERSET_ADMIN_PASSWORD:-}
-      CLICKHOUSE_HOST: ${CLICKHOUSE_HOST:-}
-      CLICKHOUSE_PORT: ${CLICKHOUSE_PORT:-8443}
-      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-default}
-      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-streamloom}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-streamloom}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
     command: ["/bin/sh", "/app/streamloom/init.sh"]
     depends_on:
@@ -113,6 +139,8 @@ services:
     ports:
       - "127.0.0.1:8088:8088"
     depends_on:
+      clickhouse:
+        condition: service_healthy
       superset-init:
         condition: service_completed_successfully
     healthcheck:
@@ -127,3 +155,4 @@ volumes:
   zookeeper-log:
   kafka-data:
   superset-db-data:
+  clickhouse-data:

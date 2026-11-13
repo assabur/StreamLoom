@@ -21,23 +21,21 @@ def provision():
     from superset.models.dashboard import Dashboard
     from superset.models.slice import Slice
 
-    host = os.environ["CLICKHOUSE_HOST"]
-    if not host or host == "your-instance.clickhouse.cloud":
-        raise ValueError("Renseigner CLICKHOUSE_HOST dans .env avant make superset-setup")
-    schema = os.environ.get("CLICKHOUSE_DATABASE", "default")
+    host = "clickhouse"
+    schema = os.environ.get("CLICKHOUSE_DATABASE", "streamloom")
     # Restrict the identifier interpolated in dataset SQL; credentials are URL-encoded.
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", schema):
         raise ValueError("CLICKHOUSE_DATABASE doit être un identifiant SQL simple")
     owner = security_manager.find_user(username=os.environ.get("SUPERSET_ADMIN_USERNAME", "admin"))
     database = db.session.query(Database).filter_by(database_name="StreamLoom ClickHouse").one_or_none()
     if database is None:
-        user = quote(os.environ.get("CLICKHOUSE_USER", "default"), safe="")
-        password = quote(os.environ["CLICKHOUSE_PASSWORD"], safe="")
-        port = int(os.environ.get("CLICKHOUSE_PORT", "8443"))
         database = Database(database_name="StreamLoom ClickHouse", expose_in_sqllab=True)
-        database.set_sqlalchemy_uri(f"clickhousedb://{user}:{password}@{host}:{port}/{schema}?secure=true")
         db.session.add(database)
-        db.session.flush()
+    # Also migrate the connection already stored in an existing Superset volume.
+    user = quote(os.environ.get("CLICKHOUSE_USER", "streamloom"), safe="")
+    password = quote(os.environ["CLICKHOUSE_PASSWORD"], safe="")
+    database.set_sqlalchemy_uri(f"clickhousedb://{user}:{password}@{host}:8123/{schema}?secure=false")
+    db.session.flush()
 
     datasets = {}
     for period, table in (("minute", "eod_agg_1m"), ("heure", "eod_agg_1h"), ("jour", "eod_agg_daily")):

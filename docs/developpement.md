@@ -8,7 +8,8 @@ Le projet contient deux applications indépendantes. Le producteur collecte les 
 
 | Fichier | Responsabilité |
 | --- | --- |
-| [apps/producer/main.go](../apps/producer/main.go) | Options CLI, collecte CSV Stooq et publication Kafka |
+| [apps/producer/main.go](../apps/producer/main.go) | Options CLI, collecte Stooq optionnelle et publication Kafka |
+| [simulation.go](../apps/producer/simulation.go) | Génération de cotations fictives, cadence et timestamps Kafka simulés |
 | [App.scala](../apps/processor/src/main/scala/streamloom/eod/App.scala) | Démarrage et arrêt de Kafka Streams |
 | [StreamConfig.scala](../apps/processor/src/main/scala/streamloom/eod/StreamConfig.scala) | Variables d’environnement et valeurs par défaut |
 | [QuoteTopology.scala](../apps/processor/src/main/scala/streamloom/eod/QuoteTopology.scala) | Parcours des messages entre les topics |
@@ -108,7 +109,7 @@ Les tests du flux utilisent [`TopologyTestDriver`](https://kafka.apache.org/36/s
 
 Les rapports JUnit XML sont générés dans `target/test-reports/` et le rapport HTML Cucumber dans `target/reports/cucumber.html`, à l’intérieur du module.
 
-Depuis la racine, les mêmes tests sont accessibles avec `make test`, `make test-unit` et `make test-bdd`. Les tâches `make test` et `make test-unit` vérifient aussi que le producteur Go compile via `go test ./...` ; aucun test Go n’est encore défini.
+Depuis la racine, les mêmes tests sont accessibles avec `make test`, `make test-unit` et `make test-bdd`. Les tâches `make test` et `make test-unit` exécutent aussi les douze tests Go via `go test ./...`. Ils vérifient les cotations fictives (cohérence OHLCV, graine reproductible, timestamps et arrêt), et simulent les réponses HTTP Stooq et la publication Kafka pour vérifier le parsing CSV, les erreurs HTTP, le rejet des réponses non CSV, l’arrêt lorsque tous les symboles renvoient 404 et la poursuite avec un symbole valide.
 
 Les commandes `unitTest` et `bddTest` écrivent dans ces mêmes dossiers ; les rapports correspondent aux tests exécutés.
 

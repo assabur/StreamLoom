@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -41,9 +43,14 @@ func main() {
 	countFlag := flag.Int("count", 1, "Number of messages to send")
 	intervalFlag := flag.Duration("interval", 0, "Delay between messages (e.g. 250ms, 1s)")
 	stdinFlag := flag.Bool("stdin", false, "Read messages from stdin, one per line")
+	simulateFlag := flag.Bool("simulate", false, "Generate synthetic quotes without any external API")
+	seedFlag := flag.Int64("seed", 1, "Simulation random seed")
+	roundsFlag := flag.Int("simulation-rounds", 0, "Simulation rounds per symbol; 0 runs until interrupted")
+	stepFlag := flag.Duration("simulation-step", 0, "Simulated time between rounds; 0 uses the current time")
+	startFlag := flag.String("simulation-start", "", "Simulation start in RFC3339 (requires simulation-step > 0)")
 	stooqFlag := flag.Bool("stooq", false, "Fetch from Stooq and publish normalized quotes")
-	symbolsFlag := flag.String("symbols", defaultSymbols, "Stooq symbols, comma-separated (env SYMBOLS)")
-	pollFlag := flag.Duration("poll-interval", time.Second, "Stooq polling interval")
+	symbolsFlag := flag.String("symbols", defaultSymbols, "Symbols, comma-separated (env SYMBOLS)")
+	pollFlag := flag.Duration("poll-interval", time.Second, "Interval between quote batches")
 	stooqURLFlag := flag.String("stooq-url", defaultStooqURL, "Stooq URL template with %s placeholder (env STOOQ_URL)")
 	flag.Parse()
 
@@ -52,8 +59,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	if !*stdinFlag && !*stooqFlag && *messageFlag == "" {
-		fmt.Fprintln(os.Stderr, "message is required unless -stdin is set")
+	modes := 0
+	for _, enabled := range []bool{*stdinFlag, *stooqFlag, *simulateFlag, *messageFlag != ""} {
+		if enabled {
+			modes++
+		}
+	}
+	if modes > 1 {
+		fmt.Fprintln(os.Stderr, "choose one mode: -simulate, -stooq, -stdin or -message")
+		os.Exit(1)
+	}
+	if modes == 0 {
+		fmt.Fprintln(os.Stderr, "choose a mode: -simulate, -stooq, -stdin or -message")
 		os.Exit(1)
 	}
 
@@ -62,10 +79,15 @@ func main() {
 		brokers[i] = strings.TrimSpace(broker)
 	}
 
+	var balancer kafka.Balancer = &kafka.LeastBytes{}
+	if *simulateFlag {
+		// Keep each simulated symbol ordered when the topic has multiple partitions.
+		balancer = &kafka.Hash{}
+	}
 	writer := kafka.NewWriter(kafka.WriterConfig{
 		Brokers:  brokers,
 		Topic:    *topicFlag,
-		Balancer: &kafka.LeastBytes{},
+		Balancer: balancer,
 		Dialer:   &kafka.Dialer{ClientID: *clientIDFlag},
 	})
 	defer func() {
@@ -74,6 +96,27 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if *simulateFlag {
+		var start time.Time
+		if *startFlag != "" {
+			var err error
+			start, err = time.Parse(time.RFC3339, *startFlag)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "invalid simulation-start: %v\n", err)
+				os.Exit(1)
+			}
+		}
+		err := runSimulation(ctx, writer, simulationConfig{
+			Symbols: *symbolsFlag, Key: *keyFlag, Interval: *pollFlag,
+			Seed: *seedFlag, Rounds: *roundsFlag, Step: *stepFlag, Start: start,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "simulation failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if *stooqFlag {
 		if err := runStooq(ctx, writer, *keyFlag, *symbolsFlag, *pollFlag, *stooqURLFlag); err != nil {
@@ -130,7 +173,11 @@ func sendFromStdin(ctx context.Context, writer *kafka.Writer, key string) {
 	}
 }
 
-func writeMessage(ctx context.Context, writer *kafka.Writer, key, payload string) error {
+type messageWriter interface {
+	WriteMessages(context.Context, ...kafka.Message) error
+}
+
+func writeMessage(ctx context.Context, writer messageWriter, key, payload string) error {
 	msg := kafka.Message{
 		Key:   []byte(key),
 		Value: []byte(payload),
@@ -139,7 +186,7 @@ func writeMessage(ctx context.Context, writer *kafka.Writer, key, payload string
 	return writer.WriteMessages(ctx, msg)
 }
 
-type stooqQuote struct {
+type marketQuote struct {
 	Symbol    string  `json:"symbol"`
 	Date      string  `json:"date"`
 	Time      string  `json:"time"`
@@ -152,7 +199,7 @@ type stooqQuote struct {
 	FetchedAt string  `json:"fetched_at"`
 }
 
-func runStooq(ctx context.Context, writer *kafka.Writer, key, symbols string, poll time.Duration, urlTemplate string) error {
+func runStooq(ctx context.Context, writer messageWriter, key, symbols string, poll time.Duration, urlTemplate string) error {
 	symbolList := splitCSV(symbols)
 	if len(symbolList) == 0 {
 		return fmt.Errorf("no symbols provided")
@@ -166,15 +213,20 @@ func runStooq(ctx context.Context, writer *kafka.Writer, key, symbols string, po
 	defer ticker.Stop()
 
 	for {
+		notFound := 0
 		for _, symbol := range symbolList {
 			select {
 			case <-ctx.Done():
 				return nil
 			default:
 			}
-			quote, err := fetchStooq(ctx, client, fmt.Sprintf(urlTemplate, symbol), symbol)
+			quote, err := fetchStooq(ctx, client, fmt.Sprintf(urlTemplate, url.QueryEscape(strings.ToLower(symbol))), symbol)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "stooq fetch error for %s: %v\n", symbol, err)
+				var statusErr *stooqHTTPError
+				if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusNotFound {
+					notFound++
+				}
 				continue
 			}
 			payload, err := json.Marshal(quote)
@@ -187,6 +239,10 @@ func runStooq(ctx context.Context, writer *kafka.Writer, key, symbols string, po
 			}
 		}
 
+		if notFound == len(symbolList) {
+			return fmt.Errorf("Stooq returned HTTP 404 for every symbol; verify the symbols and STOOQ_URL (-stooq-url), or choose another quote source; stopping polling")
+		}
+
 		select {
 		case <-ctx.Done():
 			return nil
@@ -195,18 +251,28 @@ func runStooq(ctx context.Context, writer *kafka.Writer, key, symbols string, po
 	}
 }
 
-func fetchStooq(ctx context.Context, client *http.Client, url, symbol string) (*stooqQuote, error) {
+type stooqHTTPError struct {
+	StatusCode int
+}
+
+func (err *stooqHTTPError) Error() string {
+	return fmt.Sprintf("HTTP %d (%s)", err.StatusCode, http.StatusText(err.StatusCode))
+}
+
+func fetchStooq(ctx context.Context, client *http.Client, url, symbol string) (*marketQuote, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
+	req.Header.Set("User-Agent", "StreamLoom/0.1")
+	req.Header.Set("Accept", "text/csv")
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("status %d", resp.StatusCode)
+		return nil, &stooqHTTPError{StatusCode: resp.StatusCode}
 	}
 
 	reader := csv.NewReader(resp.Body)
@@ -226,6 +292,12 @@ func fetchStooq(ctx context.Context, client *http.Client, url, symbol string) (*
 	for i, name := range header {
 		if i < len(record) {
 			data[name] = record[i]
+		}
+	}
+
+	for _, name := range []string{"Date", "Time", "Open", "High", "Low", "Close", "Volume"} {
+		if _, ok := data[name]; !ok {
+			return nil, fmt.Errorf("unexpected Stooq response: missing CSV column %q (expected quote CSV)", name)
 		}
 	}
 
@@ -250,7 +322,7 @@ func fetchStooq(ctx context.Context, client *http.Client, url, symbol string) (*
 		return nil, fmt.Errorf("volume: %w", err)
 	}
 
-	return &stooqQuote{
+	return &marketQuote{
 		Symbol:    symbol,
 		Date:      data["Date"],
 		Time:      data["Time"],

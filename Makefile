@@ -2,12 +2,17 @@
 
 SYMBOLS ?= AAPL.US,MSFT.US
 POLL_INTERVAL ?= 5s
+SEED ?= 1
+SIMULATION_ROUNDS ?= 0
+SIMULATION_STEP ?= 0s
+SIMULATION_START ?=
 
-.PHONY: help up topics producer processor test test-unit test-bdd build connect connector connector-update superset superset-env superset-setup logs down
+.PHONY: help up topics producer producer-stooq processor test test-unit test-bdd build connect connector connector-update superset superset-env superset-setup logs down
 
 help:
 	@printf '%s\n' \
-	  'Démarrer : make up (Kafka + Superset), make topics, puis make processor et make producer dans deux terminaux' \
+	  'Démarrer : make up (Kafka + ClickHouse + Superset), make topics, puis make processor et make producer dans deux terminaux' \
+	  'Simuler  : make producer (cotations fictives, sans API)' \
 	  'Tester   : make test | make test-unit | make test-bdd' \
 	  'Compiler : make build' \
 	  'Stocker  : make connect, puis make connector quand son API est disponible' \
@@ -16,7 +21,7 @@ help:
 	  'Arrêter  : make down'
 
 up: superset-env
-	docker compose up -d --build --wait --wait-timeout 240 zookeeper kafka kafka-ui superset
+	docker compose up -d --build --wait --wait-timeout 240 zookeeper kafka kafka-ui clickhouse superset
 
 topics:
 	@set -e; for topic in eod eod-agg-1m eod-agg-1h eod-agg-daily eod-dlt; do \
@@ -25,7 +30,17 @@ topics:
 	    --topic "$$topic" --partitions 1 --replication-factor 1; \
 	done
 
+# With multiple goals, bring services up before either long-running application.
+ifneq ($(filter up,$(MAKECMDGOALS)),)
+producer producer-stooq processor: up
+endif
+
 producer:
+	cd apps/producer && go run . -simulate -symbols "$(SYMBOLS)" -poll-interval "$(POLL_INTERVAL)" \
+	  -seed "$(SEED)" -simulation-rounds "$(SIMULATION_ROUNDS)" \
+	  -simulation-step "$(SIMULATION_STEP)" -simulation-start "$(SIMULATION_START)"
+
+producer-stooq:
 	cd apps/producer && go run . -stooq -symbols "$(SYMBOLS)" -poll-interval "$(POLL_INTERVAL)"
 
 processor:
@@ -47,7 +62,7 @@ build:
 	cd apps/producer && go build -o ../../build/producer .
 	cd apps/processor && sbt test package
 
-connect:
+connect: superset-env
 	docker compose up -d --build kafka-connect
 
 connector:
